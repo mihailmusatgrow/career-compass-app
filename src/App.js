@@ -3,9 +3,12 @@ import { initializeApp } from 'firebase/app';
 import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
 import { getFirestore, doc, setDoc, getDoc } from 'firebase/firestore';
 
-// Placeholder for Firebase configuration and app ID (will be provided by the environment)
+// IMPORTANT: These variables are provided by the Canvas environment.
+// For external deployment (like Netlify), they will be undefined.
+// We provide fallback empty values to ensure the app compiles.
+// To enable Firebase/Gemini API, you'll need to set up your own keys/config.
 const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
-const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'career-compass-public'; // Use a default ID for public deployment
 const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
 
 // Firebase Context to provide auth and db instances throughout the app
@@ -21,6 +24,18 @@ const useFirebase = () => {
 
   useEffect(() => {
     const initFirebase = async () => {
+      // Check if firebaseConfig is empty (likely means not in Canvas and no custom config)
+      if (Object.keys(firebaseConfig).length === 0) {
+        console.warn("Firebase configuration is empty. Database and authentication features will be disabled.");
+        setLoading(false);
+        // Set a dummy userId if no actual auth is happening
+        setUserId(localStorage.getItem('temp_user_id') || crypto.randomUUID());
+        if (!localStorage.getItem('temp_user_id')) {
+          localStorage.setItem('temp_user_id', userId);
+        }
+        return; // Exit if no Firebase config
+      }
+
       try {
         const app = initializeApp(firebaseConfig);
         const firestore = getFirestore(app);
@@ -42,8 +57,6 @@ const useFirebase = () => {
             setUserId(user.uid);
           } else {
             // Fallback for anonymous or unauthenticated users if __initial_auth_token was not provided
-            // and signInAnonymously failed or was not called.
-            // This is primarily for ensuring userId is set for Firestore operations.
             setUserId(crypto.randomUUID()); // Generate a unique ID if no user is found
           }
           setLoading(false);
@@ -51,8 +64,13 @@ const useFirebase = () => {
 
       } catch (e) {
         console.error("Error initializing Firebase:", e);
-        setError("Failed to initialize app. Please try again later.");
+        setError("Failed to initialize Firebase. Database features may not work. Please check your Firebase configuration.");
         setLoading(false);
+        // Fallback to a temp user ID if Firebase init fails
+        setUserId(localStorage.getItem('temp_user_id') || crypto.randomUUID());
+        if (!localStorage.getItem('temp_user_id')) {
+          localStorage.setItem('temp_user_id', userId);
+        }
       }
     };
 
@@ -602,8 +620,9 @@ const Results = ({ userName, hollandScores, bigFiveScores, preferences, recommen
     if (preferences?.careerAdvice) {
       setCareerAdvice(preferences.careerAdvice);
     }
+    // Deep copy enhancedJobDescriptions to avoid direct mutation issues
     if (preferences?.enhancedJobDescriptions) {
-      setExpandedDescription(preferences.enhancedJobDescriptions);
+      setExpandedDescription({ ...preferences.enhancedJobDescriptions });
     }
   }, [preferences]);
 
@@ -628,8 +647,8 @@ const Results = ({ userName, hollandScores, bigFiveScores, preferences, recommen
 
   const handleEnhanceDescriptionClick = async (jobTitle, jobId) => {
     setEnhancedDescLoading(prev => ({ ...prev, [jobId]: true }));
-    const enhanced = await onEnhanceDescription(jobTitle);
-    setExpandedDescription(prev => ({ ...prev, [jobId]: enhanced }));
+    const enhanced = await onEnhanceDescription(jobTitle, jobId); // Pass jobId for internal tracking
+    setExpandedDescription(prev => ({ ...prev, [jobId]: enhanced })); // Use jobId for setting state
     setEnhancedDescLoading(prev => ({ ...prev, [jobId]: false }));
   };
 
@@ -858,26 +877,23 @@ const App = () => {
 
   // Function to save/update the entire user profile in Firestore
   const saveUserProfile = async (dataToSave) => {
-    if (!db || !userId) {
-      console.warn("Firestore not ready or userId missing, data not saved.");
-      setModalContent({
-        title: 'Save Warning',
-        message: 'Your data could not be saved to the database. Please ensure you are logged in.'
-      });
-      setShowModal(true);
-      return;
-    }
-    try {
-      const userDocRef = doc(db, 'artifacts', appId, 'users', userId, 'user_career_profile', 'current');
-      // Merge with existing data to ensure partial updates work
-      await setDoc(userDocRef, { ...dataToSave, timestamp: new Date().toISOString() }, { merge: true });
-    } catch (e) {
-      console.error("Error saving user profile:", e);
-      setModalContent({
-        title: 'Save Error',
-        message: 'There was an issue saving your career profile.'
-      });
-      setShowModal(true);
+    // Only attempt to save if db and userId are available
+    if (db && userId) {
+      try {
+        const userDocRef = doc(db, 'artifacts', appId, 'users', userId, 'user_career_profile', 'current');
+        // Merge with existing data to ensure partial updates work
+        await setDoc(userDocRef, { ...dataToSave, timestamp: new Date().toISOString() }, { merge: true });
+      } catch (e) {
+        console.error("Error saving user profile:", e);
+        setModalContent({
+          title: 'Save Error',
+          message: 'There was an issue saving your career profile to the database.'
+        });
+        setShowModal(true);
+      }
+    } else {
+      console.warn("Database not available. Data will not be saved.");
+      // Optionally show a modal about saving not being active
     }
   };
 
@@ -1009,8 +1025,20 @@ const App = () => {
     let chatHistory = [];
     chatHistory.push({ role: "user", parts: [{ text: prompt }] });
     const payload = { contents: chatHistory };
-    const apiKey = ""; // Leave as empty string for Canvas to provide
+    // IMPORTANT: Replace "" with your actual Gemini API Key from Google Cloud Console.
+    // For local development, you might keep it empty if using a proxy or specific setup.
+    const apiKey = "";
     const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`;
+
+    if (!apiKey) {
+      console.warn("Gemini API Key is missing. Personalized career advice will not be generated.");
+      setModalContent({
+        title: 'API Key Missing',
+        message: 'To enable personalized career advice, please provide your Gemini API key in src/App.js.'
+      });
+      setShowModal(true);
+      return "Gemini API key is not configured. Please add your API key to enable this feature.";
+    }
 
     try {
       const response = await fetch(apiUrl, {
@@ -1029,7 +1057,7 @@ const App = () => {
         await saveUserProfile({ careerAdvice: advice });
         return advice;
       } else {
-        console.error("Gemini API returned unexpected structure or no content for career advice.");
+        console.error("Gemini API returned unexpected structure or no content for career advice.", result);
         return "Could not generate personalized career advice at this time.";
       }
     } catch (e) {
@@ -1044,14 +1072,25 @@ const App = () => {
   };
 
   // LLM Call: Generate Enhanced Job Description
-  const generateEnhancedDescription = async (jobTitle) => {
+  const generateEnhancedDescription = async (jobTitle, jobId) => {
     const prompt = `Provide a more detailed and engaging job description for a "${jobTitle}". Include typical responsibilities, required skills, and potential work environments. Keep it professional and concise.`;
 
     let chatHistory = [];
     chatHistory.push({ role: "user", parts: [{ text: prompt }] });
     const payload = { contents: chatHistory };
-    const apiKey = ""; // Leave as empty string for Canvas to provide
+    // IMPORTANT: Replace "" with your actual Gemini API Key from Google Cloud Console.
+    const apiKey = "";
     const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`;
+
+    if (!apiKey) {
+      console.warn("Gemini API Key is missing. Enhanced job descriptions will not be generated.");
+      setModalContent({
+        title: 'API Key Missing',
+        message: 'To enable enhanced job descriptions, please provide your Gemini API key in src/App.js.'
+      });
+      setShowModal(true);
+      return "Gemini API key is not configured. This feature is disabled.";
+    }
 
     try {
       const response = await fetch(apiUrl, {
@@ -1065,16 +1104,16 @@ const App = () => {
           result.candidates[0].content && result.candidates[0].content.parts &&
           result.candidates[0].content.parts.length > 0) {
         const enhancedText = result.candidates[0].content.parts[0].text;
-        // Save the enhanced description to Firestore
+        // Save the enhanced description to Firestore, using jobId as key for better tracking
         const updatedEnhancedDescriptions = {
           ...(preferences?.enhancedJobDescriptions || {}),
-          [jobTitle]: enhancedText // Store by jobTitle for simplicity
+          [jobId]: enhancedText // Use jobId as the key
         };
         setPreferences(prev => ({ ...prev, enhancedJobDescriptions: updatedEnhancedDescriptions }));
         await saveUserProfile({ enhancedJobDescriptions: updatedEnhancedDescriptions });
         return enhancedText;
       } else {
-        console.error("Gemini API returned unexpected structure or no content for job description.");
+        console.error("Gemini API returned unexpected structure or no content for job description.", result);
         return "Could not generate enhanced description.";
       }
     } catch (e) {
@@ -1097,8 +1136,7 @@ const App = () => {
     setPreferences(null);
     setRecommendedJobs([]);
     setStep('start'); // Go back to start to re-enter name
-    // Optionally, clear data from Firestore for this user here if you want a complete reset
-    // This would require a deleteDoc call. For now, it will just overwrite on new quiz submission.
+    // No need to explicitly clear Firestore here; new data will overwrite 'current' profile
   };
 
   if (loading) {
